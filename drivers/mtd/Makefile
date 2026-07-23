@@ -27,7 +27,7 @@ obj-y += spi/
 obj-$(CONFIG_MTD_UBI) += ubi/
 obj-$(CONFIG_NVMXIP) += nvmxip/
 obj-$(CONFIG_MTD_BLOCK) += mtdblock.o
-obj-$(CONFIG_MTD_RAID301) += mtd_raid301.o
+obj-$(CONFIG_MTD_RAID301) += mtd_raid301.o mtd_raid301_map.o mtd_raid301_io.o
 
 #SPL/TPL build
 else

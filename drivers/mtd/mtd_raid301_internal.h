@@ -108,4 +108,24 @@ static inline void raid301_check_layout_struct_sizes(void)
 	BUILD_BUG_ON(sizeof(struct raid301_journal_record) != 64);
 }
 
+/* Mapping API Prototypes */
+bool raid301_validate_stride(u32 stride, u32 member_count);
+u16  raid301_stripe_to_parity_member(u32 stripe_id);
+u16  raid301_data_to_phys_member(u32 stripe_id, u16 data_index);
+int  raid301_calc_physical_offset(u16 member_id, u32 stripe_id, u64 *out_offset);
+int  raid301_validate_backing_mtd(struct mtd_info *master);
+
+/* Low-Level IO & Footer API Prototypes */
+int  raid301_raw_read(struct mtd_info *master, u64 offset, u32 len, u8 *buf);
+int  raid301_raw_write(struct mtd_info *master, u64 offset, u32 len, const u8 *buf);
+int  raid301_raw_erase_unit(struct mtd_info *master, u64 offset);
+void raid301_populate_footer(struct raid301_sector_footer *footer,
+			     u8 role, u8 flags, u32 stripe_id, u16 member_id,
+			     u16 data_index, u64 generation, u32 payload_crc32);
+bool raid301_verify_footer(const struct raid301_sector_footer *footer,
+			    u8 expected_role, u32 expected_stripe,
+			    u16 expected_member, u16 expected_data_idx);
+int  raid301_write_sector_ordered(struct mtd_info *master, u64 sector_offset,
+				 const u8 *payload, const struct raid301_sector_footer *footer);
+
 #endif /* __MTD_RAID301_INTERNAL_H__ */
