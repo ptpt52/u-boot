@@ -133,4 +133,16 @@ int  raid301_format_device(struct mtd_info *master);
 int  raid301_scan_superblocks(struct mtd_info *master, u8 *out_uuid, u32 *out_hash);
 int  raid301_verify_all_stripes(struct mtd_info *master);
 
+/* Step 4: Distributed Journal API Prototypes */
+void raid301_populate_record(struct raid301_journal_record *rec,
+			     u8 type, u8 flags, u64 txid, u16 stripe_id,
+			     u16 data_index, u32 old_data_crc, u32 new_data_crc,
+			     u32 old_parity_crc, u32 new_parity_crc,
+			     u64 old_data_gen, u64 old_parity_gen, u64 new_gen);
+u32  raid301_records_per_segment(void);
+int  raid301_select_journal_members(u16 data_member, u16 parity_member,
+				   u16 *out_journal_members, u8 count);
+int  raid301_append_journal_record(struct mtd_info *master, u16 member_id,
+				  const struct raid301_journal_record *rec);
+
 #endif /* __MTD_RAID301_INTERNAL_H__ */
