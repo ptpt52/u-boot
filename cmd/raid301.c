@@ -60,9 +60,7 @@ static int do_raid301_format(struct cmd_tbl *cmdtp, int flag, int argc, char *co
 		return CMD_RET_FAILURE;
 	}
 
-	/* Must detach existing virtual device prior to format */
 	mtd_raid301_detach();
-
 	ret = raid301_format_device(master);
 	put_mtd_device(master);
 
@@ -72,22 +70,73 @@ static int do_raid301_format(struct cmd_tbl *cmdtp, int flag, int argc, char *co
 	return CMD_RET_SUCCESS;
 }
 
-static int do_raid301_info(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+static int do_raid301_read(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
 {
 	struct mtd_info *mtd = mtd_raid301_get_dev();
+	ulong addr, offset, len;
+	void *buf;
+	size_t retlen;
+	int ret;
 
 	if (!mtd) {
-		printf("RAID301: Device not attached. Use 'raid301 attach [mtd_name]' first.\n");
+		printf("RAID301: Device not attached.\n");
 		return CMD_RET_FAILURE;
 	}
 
-	printf("\n--- MTD RAID301 Storage Status ---\n");
-	printf("Virtual MTD Name   : %s\n", mtd->name);
-	printf("Logical Size       : %llu Bytes (~%llu MiB)\n", mtd->size, mtd->size / (1024 * 1024));
-	printf("Logical Payload    : %u Bytes\n", mtd->erasesize);
-	printf("Layout Hash        : 0x%08x\n", mtd_raid301_calc_layout_hash());
-	printf("----------------------------------\n\n");
+	if (argc < 4)
+		return CMD_RET_USAGE;
 
+	addr = hextoul(argv[1], NULL);
+	offset = hextoul(argv[2], NULL);
+	len = hextoul(argv[3], NULL);
+
+	buf = map_sysmem(addr, len);
+	printf("RAID301: Reading 0x%lx bytes from logic offset 0x%lx to RAM 0x%lx...\n", len, offset, addr);
+
+	ret = mtd->_read(mtd, (loff_t)offset, len, &retlen, buf);
+	unmap_sysmem(buf);
+
+	if (ret != 0) {
+		printf("RAID301 Read Error: Failed with code %d\n", ret);
+		return CMD_RET_FAILURE;
+	}
+
+	printf("RAID301: Read 0x%zx bytes successfully.\n", retlen);
+	return CMD_RET_SUCCESS;
+}
+
+static int do_raid301_write(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	struct mtd_info *mtd = mtd_raid301_get_dev();
+	ulong addr, offset, len;
+	void *buf;
+	size_t retlen;
+	int ret;
+
+	if (!mtd) {
+		printf("RAID301: Device not attached.\n");
+		return CMD_RET_FAILURE;
+	}
+
+	if (argc < 4)
+		return CMD_RET_USAGE;
+
+	addr = hextoul(argv[1], NULL);
+	offset = hextoul(argv[2], NULL);
+	len = hextoul(argv[3], NULL);
+
+	buf = map_sysmem(addr, len);
+	printf("RAID301: Writing 0x%lx bytes from RAM 0x%lx to logic offset 0x%lx...\n", len, addr, offset);
+
+	ret = mtd->_write(mtd, (loff_t)offset, len, &retlen, buf);
+	unmap_sysmem(buf);
+
+	if (ret != 0) {
+		printf("RAID301 Write Error: Failed with code %d\n", ret);
+		return CMD_RET_FAILURE;
+	}
+
+	printf("RAID301: Wrote 0x%zx bytes successfully.\n", retlen);
 	return CMD_RET_SUCCESS;
 }
 
@@ -130,11 +179,33 @@ static int do_raid301_journal(struct cmd_tbl *cmdtp, int flag, int argc, char *c
 	return CMD_RET_SUCCESS;
 }
 
+static int do_raid301_info(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	struct mtd_info *mtd = mtd_raid301_get_dev();
+
+	if (!mtd) {
+		printf("RAID301: Device not attached.\n");
+		return CMD_RET_FAILURE;
+	}
+
+	printf("\n--- MTD RAID301 Storage Status ---\n");
+	printf("Virtual MTD Name   : %s\n", mtd->name);
+	printf("Logical Size       : %llu Bytes (~%llu MiB)\n", mtd->size, mtd->size / (1024 * 1024));
+	printf("Logical Payload    : %u Bytes\n", mtd->erasesize);
+	printf("Layout Hash        : 0x%08x\n", mtd_raid301_calc_layout_hash());
+	printf("----------------------------------\n\n");
+
+	return CMD_RET_SUCCESS;
+}
+
 static struct cmd_tbl cmd_raid301_sub[] = {
 	U_BOOT_CMD_MKENT(attach, 2, 0, do_raid301_attach, "", ""),
 	U_BOOT_CMD_MKENT(detach, 1, 0, do_raid301_detach, "", ""),
 	U_BOOT_CMD_MKENT(format, 3, 0, do_raid301_format, "", ""),
+	U_BOOT_CMD_MKENT(read, 4, 0, do_raid301_read, "", ""),
+	U_BOOT_CMD_MKENT(write, 4, 0, do_raid301_write, "", ""),
 	U_BOOT_CMD_MKENT(journal, 1, 0, do_raid301_journal, "", ""),
+	U_BOOT_CMD_MKENT(check, 2, 0, do_raid301_scrub, "", ""),
 	U_BOOT_CMD_MKENT(scrub, 2, 0, do_raid301_scrub, "", ""),
 	U_BOOT_CMD_MKENT(info, 1, 0, do_raid301_info, "", ""),
 };
@@ -156,8 +227,13 @@ static int do_raid301(struct cmd_tbl *cmdtp, int flag, int argc, char *const arg
 U_BOOT_CMD(
 	raid301, 5, 1, do_raid301,
 	"30+1 XOR RAID5 MTD Management",
-	"attach [backing_mtd]         - Attach RAID301 to backing MTD\n"
-	"raid301 detach               - Detach RAID301 virtual device\n"
-	"raid301 format <mtd> --confirm - Format backing MTD partition for RAID301\n"
-	"raid301 info                 - Show RAID301 status and superblock info"
+	"attach [backing_mtd]            - Attach RAID301 to backing MTD\n"
+	"raid301 detach                  - Detach RAID301 virtual device\n"
+	"raid301 format <mtd> --confirm    - Format backing MTD partition for RAID301\n"
+	"raid301 read <addr> <off> <len> - Read from logical offset to RAM\n"
+	"raid301 write <addr> <off> <len>- Write RAM payload to logical offset\n"
+	"raid301 check [--repair]        - Alias for scrub\n"
+	"raid301 scrub [--repair]        - Perform global stripe integrity scan & repair\n"
+	"raid301 journal                 - Show journal wear-leveling status\n"
+	"raid301 info                    - Show RAID301 status and superblock info"
 );
