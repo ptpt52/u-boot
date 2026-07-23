@@ -87,7 +87,150 @@ static void raid301_populate_journal_header(struct raid301_journal_header *hdr,
 	hdr->header_crc32 = cpu_to_le32(hcrc);
 }
 
-/* Format Device */
+static int mtd_raid301_read_ops(struct mtd_info *mtd, loff_t from, size_t len,
+				size_t *retlen, u_char *buf)
+{
+	struct mtd_info *master = g_raid301_dev.master;
+	u8 *sector_buf;
+	size_t remaining = len;
+	size_t read_bytes = 0;
+	int ret = 0;
+
+	if (!master || from + len > mtd->size)
+		return -EINVAL;
+
+	sector_buf = malloc(master->erasesize);
+	if (!sector_buf)
+		return -ENOMEM;
+
+	g_raid301_dev.stats.logical_reads++;
+
+	while (remaining > 0) {
+		u32 logic_sector = (u32)(from / RAID301_PAYLOAD_SIZE);
+		u32 offset_in_sector = (u32)(from % RAID301_PAYLOAD_SIZE);
+		u32 chunk_len = RAID301_PAYLOAD_SIZE - offset_in_sector;
+
+		if (chunk_len > remaining)
+			chunk_len = remaining;
+
+		u32 stripe_id = logic_sector / RAID301_DATA_MEMBER_COUNT;
+		u16 data_idx = (u16)(logic_sector % RAID301_DATA_MEMBER_COUNT);
+		u16 data_mem = raid301_data_to_phys_member(stripe_id, data_idx);
+
+		u64 phys_off;
+		ret = raid301_calc_physical_offset(data_mem, stripe_id, &phys_off);
+		if (ret)
+			break;
+
+		g_raid301_dev.stats.physical_reads++;
+		ret = raid301_raw_read(master, phys_off, master->erasesize, sector_buf);
+		if (ret != 0)
+			break;
+
+		const struct raid301_sector_footer *ftr =
+			(const struct raid301_sector_footer *)(sector_buf + RAID301_PAYLOAD_SIZE);
+
+		if (!raid301_verify_footer(ftr, RAID301_ROLE_DATA, stripe_id, data_mem, data_idx) ||
+		    crc32(0, sector_buf, RAID301_PAYLOAD_SIZE) != le32_to_cpu(ftr->payload_crc32)) {
+			g_raid301_dev.stats.data_crc_errors++;
+			printf("RAID301 Error: CRC/Footer mismatch at logic sector %u (phys member %u stripe %u)\n",
+			       logic_sector, data_mem, stripe_id);
+			ret = -EIO;
+			break;
+		}
+
+		memcpy(buf + read_bytes, sector_buf + offset_in_sector, chunk_len);
+		read_bytes += chunk_len;
+		from += chunk_len;
+		remaining -= chunk_len;
+	}
+
+	free(sector_buf);
+	if (retlen)
+		*retlen = read_bytes;
+
+	return ret;
+}
+
+static int mtd_raid301_write_ops(struct mtd_info *mtd, loff_t to, size_t len,
+				 size_t *retlen, const u_char *buf)
+{
+	struct mtd_info *master = g_raid301_dev.master;
+	u8 *sector_payload;
+	size_t remaining = len;
+	size_t written_bytes = 0;
+	static u64 tx_seq = 1;
+	int ret = 0;
+
+	if (!master || to + len > mtd->size)
+		return -EINVAL;
+
+	sector_payload = malloc(RAID301_PAYLOAD_SIZE);
+	if (!sector_payload)
+		return -ENOMEM;
+
+	g_raid301_dev.stats.logical_writes++;
+
+	while (remaining > 0) {
+		u32 logic_sector = (u32)(to / RAID301_PAYLOAD_SIZE);
+		u32 offset_in_sector = (u32)(to % RAID301_PAYLOAD_SIZE);
+		u32 chunk_len = RAID301_PAYLOAD_SIZE - offset_in_sector;
+
+		if (chunk_len > remaining)
+			chunk_len = remaining;
+
+		/* RMW partial sector merge if unaligned write */
+		if (chunk_len < RAID301_PAYLOAD_SIZE) {
+			size_t read_ret;
+			ret = mtd_raid301_read_ops(mtd, (loff_t)logic_sector * RAID301_PAYLOAD_SIZE,
+						   RAID301_PAYLOAD_SIZE, &read_ret, sector_payload);
+			if (ret)
+				break;
+		}
+
+		memcpy(sector_payload + offset_in_sector, buf + written_bytes, chunk_len);
+
+		ret = raid301_write_transaction(master, logic_sector, sector_payload, &tx_seq);
+		if (ret) {
+			printf("RAID301 Error: Transaction failed at logic sector %u\n", logic_sector);
+			break;
+		}
+
+		written_bytes += chunk_len;
+		to += chunk_len;
+		remaining -= chunk_len;
+	}
+
+	free(sector_payload);
+	if (retlen)
+		*retlen = written_bytes;
+
+	return ret;
+}
+
+static int mtd_raid301_erase_ops(struct mtd_info *mtd, struct erase_info *instr)
+{
+	u8 *ff_payload;
+	size_t retlen;
+	int ret;
+
+	ff_payload = malloc(RAID301_PAYLOAD_SIZE);
+	if (!ff_payload)
+		return -ENOMEM;
+
+	memset(ff_payload, 0xFF, RAID301_PAYLOAD_SIZE);
+	g_raid301_dev.stats.logical_erases++;
+
+	ret = mtd_raid301_write_ops(mtd, instr->addr, instr->len, &retlen, ff_payload);
+	free(ff_payload);
+
+	if (ret == 0)
+		instr->state = MTD_ERASE_DONE;
+	else
+		instr->state = MTD_ERASE_FAILED;
+
+	return ret;
+}
 int raid301_format_device(struct mtd_info *master)
 {
 	u8 *ff_payload, *parity_payload;
@@ -310,6 +453,13 @@ struct mtd_info *mtd_raid301_attach(const char *backing_mtd_name)
 		return NULL;
 	}
 
+	u64 next_txid = 1;
+	ret = raid301_recover_pending_transactions(master, &next_txid);
+	if (ret) {
+		printf("RAID301 Attach Error: Recovery machine failed.\n");
+		return NULL;
+	}
+
 	memset(&g_raid301_dev, 0, sizeof(g_raid301_dev));
 	g_raid301_dev.master = master;
 
@@ -323,6 +473,10 @@ struct mtd_info *mtd_raid301_attach(const char *backing_mtd_name)
 	mtd->erasesize = RAID301_PAYLOAD_SIZE;
 	mtd->writesize = 1;
 	mtd->writebufsize = master->writebufsize;
+
+	mtd->_read = mtd_raid301_read_ops;
+	mtd->_write = mtd_raid301_write_ops;
+	mtd->_erase = mtd_raid301_erase_ops;
 
 	if (add_mtd_device(mtd)) {
 		printf("RAID301 Attach Error: Failed registering virtual MTD device\n");
