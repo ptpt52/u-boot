@@ -128,4 +128,9 @@ bool raid301_verify_footer(const struct raid301_sector_footer *footer,
 int  raid301_write_sector_ordered(struct mtd_info *master, u64 sector_offset,
 				 const u8 *payload, const struct raid301_sector_footer *footer);
 
+/* Step 3: Format & Mount API Prototypes */
+int  raid301_format_device(struct mtd_info *master);
+int  raid301_scan_superblocks(struct mtd_info *master, u8 *out_uuid, u32 *out_hash);
+int  raid301_verify_all_stripes(struct mtd_info *master);
+
 #endif /* __MTD_RAID301_INTERNAL_H__ */
