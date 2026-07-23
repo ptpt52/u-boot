@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0+ */
 /*
- * 30+1 XOR RAID-5 Driver Abstraction Layer for 32MB SPI NOR Flash
+ * MTD RAID301 Public API and Kconfig Parameters Validation Header
  *
  * Copyright (C) 2026
  */
@@ -13,54 +13,97 @@
 #include <linux/mtd/mtd.h>
 #include <u-boot/crc.h>
 
-#define MTD_RAID301_FLASH_SIZE        (32 * 1024 * 1024)  /* 32MB */
-#define MTD_RAID301_BLOCK_SIZE        (1 * 1024 * 1024)   /* 1MB Block */
-#define MTD_RAID301_SECTOR_SIZE       (4096)              /* 4KB Sector */
-#define MTD_RAID301_SECTORS_PER_BLOCK (MTD_RAID301_BLOCK_SIZE / MTD_RAID301_SECTOR_SIZE) /* 256 */
+/* Kconfig Configured or Default Parameters */
+#ifndef CONFIG_MTD_RAID301_TOTAL_SIZE_BYTES
+#define CONFIG_MTD_RAID301_TOTAL_SIZE_BYTES 33554432
+#endif
 
-/* Partition Layout */
-#define MTD_RAID301_RAW_BLOCKS        (1)                 /* Block 0 (1MB) as Raw MTD */
-#define MTD_RAID301_RAW_SIZE          (MTD_RAID301_RAW_BLOCKS * MTD_RAID301_BLOCK_SIZE)
+#ifndef CONFIG_MTD_RAID301_RAW_SIZE_BYTES
+#define CONFIG_MTD_RAID301_RAW_SIZE_BYTES 1048576
+#endif
 
-#define MTD_RAID301_RAID_BLOCKS       (31)                /* Block 1~31 (31MB) as RAID5 */
-#define MTD_RAID301_DATA_BLOCKS       (30)                /* 30 Data Blocks */
-#define MTD_RAID301_PARITY_BLOCKS     (1)                 /* 1 Parity Block */
+#ifndef CONFIG_MTD_RAID301_MEMBER_SIZE_BYTES
+#define CONFIG_MTD_RAID301_MEMBER_SIZE_BYTES 1048576
+#endif
 
-/* Sector Layout (4KB = 4092 Data + 4 CRC32) */
-#define MTD_RAID301_SECTOR_DATA_SIZE  (4092)
-#define MTD_RAID301_SECTOR_CRC_SIZE   (4)
+#ifndef CONFIG_MTD_RAID301_MEMBER_COUNT
+#define CONFIG_MTD_RAID301_MEMBER_COUNT 31
+#endif
 
-/* Total Logical Size: 30 Blocks * 256 Sectors * 4092 Data Bytes */
-#define MTD_RAID301_LOGICAL_SIZE      (MTD_RAID301_DATA_BLOCKS * MTD_RAID301_SECTORS_PER_BLOCK * MTD_RAID301_SECTOR_DATA_SIZE)
+#ifndef CONFIG_MTD_RAID301_ERASE_SIZE_BYTES
+#define CONFIG_MTD_RAID301_ERASE_SIZE_BYTES 65536
+#endif
 
-struct sector_unit {
-	u8  data[MTD_RAID301_SECTOR_DATA_SIZE];
-	u32 crc32;
-} __packed;
+#ifndef CONFIG_MTD_RAID301_JOURNAL_UNITS_PER_MEMBER
+#define CONFIG_MTD_RAID301_JOURNAL_UNITS_PER_MEMBER 1
+#endif
 
+#ifndef CONFIG_MTD_RAID301_JOURNAL_COPIES
+#define CONFIG_MTD_RAID301_JOURNAL_COPIES 2
+#endif
+
+#ifndef CONFIG_MTD_RAID301_PARITY_OFFSET
+#define CONFIG_MTD_RAID301_PARITY_OFFSET 0
+#endif
+
+#ifndef CONFIG_MTD_RAID301_PARITY_STRIDE
+#define CONFIG_MTD_RAID301_PARITY_STRIDE 2
+#endif
+
+#ifndef CONFIG_MTD_RAID301_DEFAULT_MASTER
+#define CONFIG_MTD_RAID301_DEFAULT_MASTER "raid301-backing"
+#endif
+
+/* Derived Constants */
+#define RAID301_SECTOR_FOOTER_SIZE     32
+#define RAID301_JOURNAL_HEADER_SIZE    256
+#define RAID301_JOURNAL_RECORD_SIZE    64
+
+#define RAID301_PAYLOAD_SIZE           (CONFIG_MTD_RAID301_ERASE_SIZE_BYTES - RAID301_SECTOR_FOOTER_SIZE)
+#define RAID301_SLOTS_PER_MEMBER       (CONFIG_MTD_RAID301_MEMBER_SIZE_BYTES / CONFIG_MTD_RAID301_ERASE_SIZE_BYTES)
+#define RAID301_STRIPE_COUNT           (RAID301_SLOTS_PER_MEMBER - CONFIG_MTD_RAID301_JOURNAL_UNITS_PER_MEMBER)
+#define RAID301_DATA_MEMBER_COUNT      (CONFIG_MTD_RAID301_MEMBER_COUNT - 1)
+
+#define RAID301_LOGICAL_SIZE           ((u64)RAID301_DATA_MEMBER_COUNT * RAID301_STRIPE_COUNT * RAID301_PAYLOAD_SIZE)
+
+/* Statistics Tracker */
 struct mtd_raid301_stats {
-	u32 read_ops;
-	u32 write_ops;
-	u32 erase_ops;
-	u32 crc_errors;
-	u32 recovered_sectors;
-	u32 uncorrectable_errors;
+	u32 logical_reads;
+	u32 logical_writes;
+	u32 logical_erases;
+	u32 physical_reads;
+	u32 physical_writes;
+	u32 physical_erases;
+	u32 data_crc_errors;
+	u32 parity_crc_errors;
+	u32 footer_errors;
+	u32 reconstructed_reads;
+	u32 successful_repairs;
+	u32 failed_repairs;
+	u32 uncorrectable_stripes;
+	u32 journal_begin_records;
+	u32 journal_commit_records;
+	u32 journal_abort_records;
+	u32 journal_rollbacks;
+	u32 journal_rollforwards;
+	u32 degraded_member_mask;
 };
 
+/* Virtual Device Context */
 struct mtd_raid301_dev {
-	struct mtd_info *master;       /* Master 32M SPI NOR MTD device */
-	struct mtd_info mtd;          /* Virtual MTD device exposed to U-Boot */
+	struct mtd_info *master;       /* Backing MTD Partition */
+	struct mtd_info mtd;          /* Exposed Virtual MTD Device */
 	struct mtd_raid301_stats stats;
+	u8   volume_uuid[16];
+	u32  layout_hash;
 	bool initialized;
+	bool is_read_only;
 };
 
 /* API Declarations */
-struct mtd_info *mtd_raid301_init(struct mtd_info *master);
-void mtd_raid301_cleanup(void);
+struct mtd_info *mtd_raid301_attach(const char *backing_mtd_name);
+int mtd_raid301_detach(void);
 struct mtd_info *mtd_raid301_get_dev(void);
-
-int mtd_raid301_inject_fault(u32 phys_block, u32 sector_idx);
-int mtd_raid301_scrub(void);
-void mtd_raid301_dump_info(void);
+u32 mtd_raid301_calc_layout_hash(void);
 
 #endif /* __MTD_RAID301_H__ */
