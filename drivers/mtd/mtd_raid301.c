@@ -55,10 +55,10 @@ u32 mtd_raid301_calc_layout_hash(void)
 }
 
 /* Populate Journal Segment Header (Superblock) */
-static void raid301_populate_journal_header(struct raid301_journal_header *hdr,
-					     const u8 *volume_uuid, u16 member_id,
-					     u16 journal_slot, u64 seq, u64 erase_cnt,
-					     u64 txid_watermark)
+void raid301_populate_journal_header(struct raid301_journal_header *hdr,
+				     const u8 *volume_uuid, u16 member_id,
+				     u16 journal_slot, u64 seq, u64 erase_cnt,
+				     u64 txid_watermark)
 {
 	memset(hdr, 0, sizeof(*hdr));
 	hdr->magic = RAID301_JOURNAL_HEADER_MAGIC;

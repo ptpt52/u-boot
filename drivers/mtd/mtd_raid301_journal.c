@@ -14,13 +14,6 @@
 #include <mtd_raid301.h>
 #include "mtd_raid301_internal.h"
 
-/* Record Slot Status */
-enum raid301_slot_status {
-	RAID301_SLOT_FREE = 0,
-	RAID301_SLOT_VALID,
-	RAID301_SLOT_CONSUMED_INVALID,
-};
-
 /* Populate Journal Record Structure */
 void raid301_populate_record(struct raid301_journal_record *rec,
 			     u8 type, u8 flags, u64 txid, u16 stripe_id,
@@ -87,14 +80,7 @@ u32 raid301_records_per_segment(void)
 	return (erase_size - header_size) / record_size;
 }
 
-/*
- * Dual-Copy Isolation Member Placement Algorithm (Section 8.4):
- * Select C (journal_copies) members satisfying:
- * 1. C copies in C distinct members.
- * 2. Cannot be data_member.
- * 3. Cannot be parity_member.
- * 4. Must have at least 2 FREE record slots available.
- */
+/* Dual-Copy Isolation Member Placement Algorithm */
 int raid301_select_journal_members(u16 data_member, u16 parity_member,
 				   u16 *out_journal_members, u8 count)
 {
@@ -169,6 +155,80 @@ int raid301_append_journal_record(struct mtd_info *master, u16 member_id,
 		printf("RAID301 Journal Error: Readback validation failed after append\n");
 		return -EIO;
 	}
+
+	return 0;
+}
+
+/* Write Checkpoint Record to Maintain High Watermark */
+int raid301_write_checkpoint(struct mtd_info *master, u64 high_watermark_txid)
+{
+	u16 journal_mems[CONFIG_MTD_RAID301_JOURNAL_COPIES];
+	int ret;
+
+	ret = raid301_select_journal_members(0, 1, journal_mems, CONFIG_MTD_RAID301_JOURNAL_COPIES);
+	if (ret)
+		return ret;
+
+	struct raid301_journal_record rec;
+	raid301_populate_record(&rec, RAID301_JOURNAL_TYPE_CHECKPOINT, 0,
+				high_watermark_txid, 0, 0, 0, 0, 0, 0, 0, 0, high_watermark_txid);
+
+	for (u8 c = 0; c < CONFIG_MTD_RAID301_JOURNAL_COPIES; c++) {
+		ret = raid301_append_journal_record(master, journal_mems[c], &rec);
+		if (ret) {
+			printf("RAID301 Journal Error: Persisting CHECKPOINT failed on member %u\n", journal_mems[c]);
+			return ret;
+		}
+	}
+	return 0;
+}
+
+/* Journal Garbage Collection & Segment Recycle (Section 11.1) */
+int raid301_journal_gc_segment(struct mtd_info *master, u16 member_id,
+			      u64 current_seq, u64 current_erase_cnt, u64 txid_watermark)
+{
+	u64 segment_phys_off;
+	int ret;
+
+	ret = raid301_calc_physical_offset(member_id, RAID301_STRIPE_COUNT, &segment_phys_off);
+	if (ret)
+		return ret;
+
+	/* 1. Erase full journal unit */
+	ret = raid301_raw_erase_unit(master, segment_phys_off);
+	if (ret)
+		return ret;
+
+	/* 2. Write new segment header with incremented sequence and erase count */
+	struct raid301_journal_header jhdr;
+	u8 volume_uuid[16] = {0};
+
+	u32 hash = mtd_raid301_calc_layout_hash();
+	for (int i = 0; i < 16; i++) {
+		volume_uuid[i] = (u8)((hash >> ((i % 4) * 8)) ^ (i * 0x31));
+	}
+
+	raid301_populate_journal_header(&jhdr, volume_uuid, member_id, 0,
+					current_seq + 1, current_erase_cnt + 1, txid_watermark);
+
+	ret = raid301_raw_write(master, segment_phys_off, sizeof(jhdr), (const u8 *)&jhdr);
+	if (ret)
+		return ret;
+
+	/* 3. Read back and verify header */
+	struct raid301_journal_header read_hdr;
+	ret = raid301_raw_read(master, segment_phys_off, sizeof(read_hdr), (u8 *)&read_hdr);
+	if (ret)
+		return ret;
+
+	u32 calc_hcrc = crc32(0, (const u8 *)&read_hdr, 92);
+	if (calc_hcrc != le32_to_cpu(read_hdr.header_crc32)) {
+		printf("RAID301 GC Error: Readback header CRC check failed after recycle\n");
+		return -EIO;
+	}
+
+	printf("RAID301 GC: Successfully recycled journal segment on member %u (Erase Count: %llu)\n",
+	       member_id, current_erase_cnt + 1);
 
 	return 0;
 }

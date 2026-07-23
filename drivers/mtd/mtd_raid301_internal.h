@@ -129,6 +129,10 @@ int  raid301_write_sector_ordered(struct mtd_info *master, u64 sector_offset,
 				 const u8 *payload, const struct raid301_sector_footer *footer);
 
 /* Step 3: Format & Mount API Prototypes */
+void raid301_populate_journal_header(struct raid301_journal_header *hdr,
+				     const u8 *volume_uuid, u16 member_id,
+				     u16 journal_slot, u64 seq, u64 erase_cnt,
+				     u64 txid_watermark);
 int  raid301_format_device(struct mtd_info *master);
 int  raid301_scan_superblocks(struct mtd_info *master, u8 *out_uuid, u32 *out_hash);
 int  raid301_verify_all_stripes(struct mtd_info *master);
@@ -152,6 +156,9 @@ int  raid301_select_journal_members(u16 data_member, u16 parity_member,
 				   u16 *out_journal_members, u8 count);
 int  raid301_append_journal_record(struct mtd_info *master, u16 member_id,
 				  const struct raid301_journal_record *rec);
+int  raid301_write_checkpoint(struct mtd_info *master, u64 high_watermark_txid);
+int  raid301_journal_gc_segment(struct mtd_info *master, u16 member_id,
+			      u64 current_seq, u64 current_erase_cnt, u64 txid_watermark);
 
 /* Step 5: Transaction Protocol & Recovery API Prototypes */
 int  raid301_write_transaction(struct mtd_info *master, u32 logic_sector_idx,

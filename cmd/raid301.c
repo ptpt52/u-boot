@@ -111,10 +111,30 @@ static int do_raid301_scrub(struct cmd_tbl *cmdtp, int flag, int argc, char *con
 	return CMD_RET_SUCCESS;
 }
 
+static int do_raid301_journal(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	struct mtd_info *mtd = mtd_raid301_get_dev();
+
+	if (!mtd) {
+		printf("RAID301: Device not attached.\n");
+		return CMD_RET_FAILURE;
+	}
+
+	printf("\n--- MTD RAID301 Journal & Wear-Leveling Status ---\n");
+	printf("Journal Units/Member: %u\n", CONFIG_MTD_RAID301_JOURNAL_UNITS_PER_MEMBER);
+	printf("Redundant Copies    : %u\n", CONFIG_MTD_RAID301_JOURNAL_COPIES);
+	printf("Records per Segment : %u\n", raid301_records_per_segment());
+	printf("Emergency Reserve   : %u Members Reserved\n", CONFIG_MTD_RAID301_JOURNAL_COPIES + 2);
+	printf("--------------------------------------------------\n\n");
+
+	return CMD_RET_SUCCESS;
+}
+
 static struct cmd_tbl cmd_raid301_sub[] = {
 	U_BOOT_CMD_MKENT(attach, 2, 0, do_raid301_attach, "", ""),
 	U_BOOT_CMD_MKENT(detach, 1, 0, do_raid301_detach, "", ""),
 	U_BOOT_CMD_MKENT(format, 3, 0, do_raid301_format, "", ""),
+	U_BOOT_CMD_MKENT(journal, 1, 0, do_raid301_journal, "", ""),
 	U_BOOT_CMD_MKENT(scrub, 2, 0, do_raid301_scrub, "", ""),
 	U_BOOT_CMD_MKENT(info, 1, 0, do_raid301_info, "", ""),
 };
