@@ -91,10 +91,31 @@ static int do_raid301_info(struct cmd_tbl *cmdtp, int flag, int argc, char *cons
 	return CMD_RET_SUCCESS;
 }
 
+static int do_raid301_scrub(struct cmd_tbl *cmdtp, int flag, int argc, char *const argv[])
+{
+	struct mtd_info *mtd = mtd_raid301_get_dev();
+	bool repair = false;
+
+	if (!mtd) {
+		printf("RAID301: Device not attached.\n");
+		return CMD_RET_FAILURE;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "--repair") == 0)
+		repair = true;
+
+	struct mtd_raid301_dev *dev = container_of(mtd, struct mtd_raid301_dev, mtd);
+	if (raid301_scrub_stripes(dev->master, repair) != 0)
+		return CMD_RET_FAILURE;
+
+	return CMD_RET_SUCCESS;
+}
+
 static struct cmd_tbl cmd_raid301_sub[] = {
 	U_BOOT_CMD_MKENT(attach, 2, 0, do_raid301_attach, "", ""),
 	U_BOOT_CMD_MKENT(detach, 1, 0, do_raid301_detach, "", ""),
 	U_BOOT_CMD_MKENT(format, 3, 0, do_raid301_format, "", ""),
+	U_BOOT_CMD_MKENT(scrub, 2, 0, do_raid301_scrub, "", ""),
 	U_BOOT_CMD_MKENT(info, 1, 0, do_raid301_info, "", ""),
 };
 

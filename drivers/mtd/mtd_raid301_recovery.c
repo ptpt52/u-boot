@@ -132,37 +132,158 @@ out_free:
 	return ret;
 }
 
-/* Scan Journal and Execute Power-Cut Recovery Machine (Section 10) */
-int raid301_recover_pending_transactions(struct mtd_info *master, u64 *out_next_txid)
+/* Reconstruct Corrupted Sector from the Remaining N - 1 Members (Section 12.1) */
+int raid301_reconstruct_sector(struct mtd_info *master, u32 stripe_id,
+			       u16 bad_phys_member, u8 *out_payload)
 {
-	u64 max_txid = 1;
+	u8 *scratch_buf;
+	u64 phys_off;
+	int ret = 0;
 
-	/*
-	 * Iterate over all journal segments to find highest Transaction ID and
-	 * resolve any uncommitted pending transactions.
-	 */
+	scratch_buf = malloc(master->erasesize);
+	if (!scratch_buf)
+		return -ENOMEM;
+
+	memset(out_payload, 0, RAID301_PAYLOAD_SIZE);
+
+	/* Read & XOR all remaining N - 1 members */
 	for (u16 m = 0; m < CONFIG_MTD_RAID301_MEMBER_COUNT; m++) {
-		u64 segment_phys_off;
-		if (raid301_calc_physical_offset(m, RAID301_STRIPE_COUNT, &segment_phys_off))
+		if (m == bad_phys_member)
 			continue;
 
-		u32 max_records = raid301_records_per_segment();
-		u64 records_base_off = segment_phys_off + RAID301_JOURNAL_HEADER_SIZE;
-		struct raid301_journal_record rec;
+		ret = raid301_calc_physical_offset(m, stripe_id, &phys_off);
+		if (ret)
+			goto out_free;
 
-		for (u32 s = 0; s < max_records; s++) {
-			u64 slot_off = records_base_off + (u64)s * RAID301_JOURNAL_RECORD_SIZE;
-			if (raid301_raw_read(master, slot_off, sizeof(rec), (u8 *)&rec))
-				continue;
+		ret = raid301_raw_read(master, phys_off, master->erasesize, scratch_buf);
+		if (ret) {
+			printf("RAID301 Reconstruction Error: Uncorrectable double fault on member %u\n", m);
+			ret = -EIO;
+			goto out_free;
+		}
 
-			if (raid301_verify_record(&rec) == RAID301_SLOT_VALID) {
-				u64 tid = le64_to_cpu(rec.transaction_id);
-				if (tid > max_txid)
-					max_txid = tid;
-			}
+		u16 parity_mem = raid301_stripe_to_parity_member(stripe_id);
+		u8 expected_role = (m == parity_mem) ? RAID301_ROLE_PARITY : RAID301_ROLE_DATA;
+		u16 expected_d_idx = (m == parity_mem) ? RAID301_PARITY_DATA_INDEX :
+				     ((m < parity_mem) ? m : m - 1);
+
+		const struct raid301_sector_footer *ftr =
+			(const struct raid301_sector_footer *)(scratch_buf + RAID301_PAYLOAD_SIZE);
+
+		if (!raid301_verify_footer(ftr, expected_role, stripe_id, m, expected_d_idx) ||
+		    crc32(0, scratch_buf, RAID301_PAYLOAD_SIZE) != le32_to_cpu(ftr->payload_crc32)) {
+			printf("RAID301 Reconstruction Error: Second corrupt sector on member %u stripe %u\n",
+			       m, stripe_id);
+			ret = -EIO;
+			goto out_free;
+		}
+
+		/* Accumulate XOR */
+		for (size_t k = 0; k < RAID301_PAYLOAD_SIZE; k++) {
+			out_payload[k] ^= scratch_buf[k];
 		}
 	}
 
-	*out_next_txid = max_txid + 1;
+out_free:
+	free(scratch_buf);
+	return ret;
+}
+
+/* Controlled Self-Healing Rewriting (Section 12.1) */
+int raid301_self_heal_sector(struct mtd_info *master, u32 stripe_id,
+			     u16 bad_phys_member, const u8 *reconstructed_payload)
+{
+#if CONFIG_IS_ENABLED(MTD_RAID301_SELF_HEAL)
+	u16 parity_mem = raid301_stripe_to_parity_member(stripe_id);
+	u8 role = (bad_phys_member == parity_mem) ? RAID301_ROLE_PARITY : RAID301_ROLE_DATA;
+	u8 flags = (role == RAID301_ROLE_PARITY) ? RAID301_FLAG_REPAIR_PARITY : RAID301_FLAG_REPAIR_DATA;
+	u16 d_idx = (role == RAID301_ROLE_PARITY) ? RAID301_PARITY_DATA_INDEX :
+		    ((bad_phys_member < parity_mem) ? bad_phys_member : bad_phys_member - 1);
+
+	u64 phys_off;
+	int ret = raid301_calc_physical_offset(bad_phys_member, stripe_id, &phys_off);
+	if (ret)
+		return ret;
+
+	u32 pcrc = crc32(0, reconstructed_payload, RAID301_PAYLOAD_SIZE);
+	struct raid301_sector_footer ftr;
+	raid301_populate_footer(&ftr, role, flags, stripe_id, bad_phys_member, d_idx, 999, pcrc);
+
+	printf("RAID301 Self-Heal: Rewriting repaired sector to member %u stripe %u...\n",
+	       bad_phys_member, stripe_id);
+	return raid301_write_sector_ordered(master, phys_off, reconstructed_payload, &ftr);
+#else
 	return 0;
+#endif
+}
+
+/* Global Physical Stripe Integrity Scrubbing (Section 12.2) */
+int raid301_scrub_stripes(struct mtd_info *master, bool repair)
+{
+	u8 *reconstructed;
+	int uncorrectable = 0;
+	int repaired_cnt = 0;
+	int ret;
+
+	reconstructed = malloc(RAID301_PAYLOAD_SIZE);
+	if (!reconstructed)
+		return -ENOMEM;
+
+	printf("RAID301 Scrub: Starting global stripe integrity scan (%s)...\n",
+	       repair ? "repair mode" : "verify-only mode");
+
+	for (u32 stripe = 0; stripe < RAID301_STRIPE_COUNT; stripe++) {
+		int bad_count = 0;
+		u16 bad_member = 0;
+
+		for (u16 m = 0; m < CONFIG_MTD_RAID301_MEMBER_COUNT; m++) {
+			u64 phys_off;
+			if (raid301_calc_physical_offset(m, stripe, &phys_off))
+				continue;
+
+			u8 *sector_buf = malloc(master->erasesize);
+			if (!sector_buf)
+				continue;
+
+			if (raid301_raw_read(master, phys_off, master->erasesize, sector_buf) != 0) {
+				bad_count++;
+				bad_member = m;
+			} else {
+				u16 parity_mem = raid301_stripe_to_parity_member(stripe);
+				u8 expected_role = (m == parity_mem) ? RAID301_ROLE_PARITY : RAID301_ROLE_DATA;
+				u16 expected_d_idx = (m == parity_mem) ? RAID301_PARITY_DATA_INDEX :
+						     ((m < parity_mem) ? m : m - 1);
+
+				const struct raid301_sector_footer *ftr =
+					(const struct raid301_sector_footer *)(sector_buf + RAID301_PAYLOAD_SIZE);
+
+				if (!raid301_verify_footer(ftr, expected_role, stripe, m, expected_d_idx) ||
+				    crc32(0, sector_buf, RAID301_PAYLOAD_SIZE) != le32_to_cpu(ftr->payload_crc32)) {
+					bad_count++;
+					bad_member = m;
+				}
+			}
+			free(sector_buf);
+		}
+
+		if (bad_count == 1) {
+			printf("RAID301 Scrub: Detected single corruption at stripe %u member %u\n",
+			       stripe, bad_member);
+			ret = raid301_reconstruct_sector(master, stripe, bad_member, reconstructed);
+			if (ret == 0 && repair) {
+				ret = raid301_self_heal_sector(master, stripe, bad_member, reconstructed);
+				if (ret == 0)
+					repaired_cnt++;
+			}
+		} else if (bad_count > 1) {
+			printf("RAID301 Scrub Error: Uncorrectable double fault at stripe %u\n", stripe);
+			uncorrectable++;
+		}
+	}
+
+	free(reconstructed);
+	printf("RAID301 Scrub Finished: Repaired: %d, Uncorrectable Stripes: %d\n",
+	       repaired_cnt, uncorrectable);
+
+	return (uncorrectable > 0) ? -EIO : 0;
 }

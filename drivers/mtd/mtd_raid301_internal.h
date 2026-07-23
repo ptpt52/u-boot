@@ -158,4 +158,11 @@ int  raid301_write_transaction(struct mtd_info *master, u32 logic_sector_idx,
 			       const u8 *new_payload_buf, u64 *tx_seq);
 int  raid301_recover_pending_transactions(struct mtd_info *master, u64 *out_next_txid);
 
+/* Step 6: Reconstruction, Self-Heal & Scrub Prototypes */
+int  raid301_reconstruct_sector(struct mtd_info *master, u32 stripe_id,
+			       u16 bad_phys_member, u8 *out_payload);
+int  raid301_self_heal_sector(struct mtd_info *master, u32 stripe_id,
+			     u16 bad_phys_member, const u8 *reconstructed_payload);
+int  raid301_scrub_stripes(struct mtd_info *master, bool repair);
+
 #endif /* __MTD_RAID301_INTERNAL_H__ */
