@@ -1565,6 +1565,12 @@ config CMD_MTD
 	help
 	  MTD commands support.
 
+config CMD_RAID301
+	bool "raid301"
+	depends on MTD_RAID301
+	help
+	  Management command for 30+1 XOR RAID-5 MTD device.
+
 config CMD_MTD_OTP
 	bool "mtd otp"
 	depends on CMD_MTD

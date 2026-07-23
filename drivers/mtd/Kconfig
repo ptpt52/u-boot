@@ -32,6 +32,13 @@ config MTD_CONCAT
 	  into a single logical device. The larger logical device can then
 	  be partitioned.
 
+config MTD_RAID301
+	bool "Enable 30+1 XOR RAID-5 MTD Abstraction Layer"
+	depends on MTD
+	help
+	  Enable 30+1 XOR RAID-5 driver abstraction layer for 32MB SPI NOR Flash,
+	  providing 1MB Raw MTD + 30MB RAID5 protected volume with single block fault tolerance.
+
 config MTD_BLOCK
 	bool "Enable block device access to MTD devices"
 	select BLK
